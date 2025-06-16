@@ -1,41 +1,135 @@
 import streamlit as st  # type: ignore
 import pandas as pd     # type: ignore
+import os
+from supabase import create_client, Client
 from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import seaborn as sns
 
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://dfhuqxvvyajbsawmmlzb.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRmaHVxeHZ2eWFqYnNhd21tbHpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk5OTkzODgsImV4cCI6MjA2NTU3NTM4OH0.BRcyjG1pyVHvHogImc6atbICfAFddQ7KCM6VUniLVUU")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# --- Load persisted data from Supabase ---
+if "players" not in st.session_state:
+    players_resp = supabase.table("players").select("*").execute()
+    st.session_state.players = {
+        row["id"]: {
+            "balance": row["balance"],
+            "holdings": {}
+        } for row in players_resp.data
+    }
+
+    holdings_resp = supabase.table("holdings").select("*").execute()
+    for row in holdings_resp.data:
+        player_id = row["player_id"]
+        if player_id in st.session_state.players:
+            st.session_state.players[player_id]["holdings"][row["ticker"]] = row["quantity"]
+
+if "transactions" not in st.session_state:
+    tx_resp = supabase.table("transactions").select("*").execute()
+    st.session_state.transactions = tx_resp.data
+
+# Ensure stock prices are loaded too
+if "stox_df" not in st.session_state:
+    prices_resp = supabase.table("prices").select("*").execute()
+    if prices_resp.data:
+        st.session_state.stox_df = pd.DataFrame(prices_resp.data)
+    else:
+        st.session_state.stox_df = pd.DataFrame(columns=["ticker", "price", "original_price"])
+
+# --- Game Config ---
+MAX_SHARES_PER_STOX = 100
+starting_balance = 15000
+starting_price = 300
+tickers = ['ANGL', 'ARYE', 'DANL', 'DRNC', 'ELLI', 'FRDY', 'JIN', 'RCHL']
+
 # --- Setup ---
 st.set_page_config(page_title="Spite Stox Market", layout="wide")
 
-# --- Starting Data ---
-MAX_SHARES_PER_STOX = 100
-starting_balance = 15000
+# --- Load prices from Supabase ---
+price_data = supabase.table("prices").select("*").execute()
 
-stox_data = {
-    'Ticker': ['ANGL', 'ARYE', 'DANL', 'DRNC', 'ELLI', 'FRDY', 'JIN', 'RCHL'],
-    'Price': [300] * 8
-}
+if price_data.data:
+    st.session_state.stox_df = pd.DataFrame(price_data.data)
+else:
+    st.warning("⚠️ No price data found in Supabase.")
+    st.session_state.stox_df = pd.DataFrame(columns=["ticker", "price", "original_price"])
 
-starting_price = 300  
+stox_df = st.session_state.stox_df
 
+# --- Set original prices from Supabase data ---
 if "original_prices" not in st.session_state:
-    st.session_state.original_prices = {ticker: starting_price for ticker in stox_data["Ticker"]}
+    st.session_state.original_prices = {
+        row["ticker"]: row["original_price"]
+        for row in st.session_state.stox_df.to_dict(orient="records")
+    }
+
+# --- Initialize price history ---
+if "price_history" not in st.session_state:
+    st.session_state.price_history = {
+        row["ticker"]: [] for row in st.session_state.stox_df.to_dict(orient="records")
+    }
 
 # --- Session State ---
+
+# Load Players & Holdings from Supabase
 if "players" not in st.session_state:
     st.session_state.players = {}
 
+    players_response = supabase.table("players").select("*").execute()
+    holdings_response = supabase.table("holdings").select("*").execute()
+
+    if players_response.data and holdings_response.data:
+        player_data = {
+            p["player_id"]: {
+                "balance": p["balance"],
+                "holdings": {}
+            }
+            for p in players_response.data
+        }
+
+        for h in holdings_response.data:
+            pid = h["player_id"]
+            ticker = h["ticker"]
+            qty = h["quantity"]
+            if pid in player_data:
+                player_data[pid]["holdings"][ticker] = qty
+
+        # Make sure all tickers exist in holdings
+        for pdata in player_data.values():
+            for ticker in stox_df["ticker"]:
+                if ticker not in pdata["holdings"]:
+                    pdata["holdings"][ticker] = 0
+
+        st.session_state.players = player_data
+
+# Transactions (local unless written to Supabase in later step)
 if "transactions" not in st.session_state:
     st.session_state.transactions = []
 
-if "stox_df" not in st.session_state:
-    st.session_state.stox_df = pd.DataFrame(stox_data)
-
-if "price_history" not in st.session_state:
-    st.session_state.price_history = {ticker: [] for ticker in stox_data["Ticker"]}
-
+# Store stock price DataFrame
 stox_df = st.session_state.stox_df
+
+# --- Load Past Transactions from Supabase ---
+if not st.session_state.transactions:
+    tx_response = supabase.table("transactions").select("*").order("time", desc=False).execute()
+
+    if tx_response.data:
+        st.session_state.transactions = [
+            {
+                "Player": tx["player"],
+                "Action": tx["action"],
+                "Stock": tx["stock"],
+                "Qty": tx["qty"],
+                "price": tx["price"],
+                "Total": tx["total"],
+                "Time": tx["time"],
+                "Memo": tx.get("memo", "")
+            }
+            for tx in tx_response.data
+        ]
 
 # --- Helper Functions ---
 def show_player_info(player):
@@ -44,7 +138,7 @@ def show_player_info(player):
 def calculate_net_worth(player):
     total = player['balance']
     for ticker, shares in player['holdings'].items():
-        price = stox_df.loc[stox_df['Ticker'] == ticker, 'Price'].values[0]
+        price = stox_df.loc[stox_df['ticker'] == ticker, 'price'].values[0]
         total += shares * price
     return total
 
@@ -68,8 +162,8 @@ col1, col2 = st.columns(2)
 
 # --- Prepare styled stox data ---
 styled_data = []
-for ticker in stox_df["Ticker"]:
-    current_price = stox_df.loc[stox_df["Ticker"] == ticker, "Price"].values[0]
+for ticker in stox_df["ticker"]:
+    current_price = stox_df.loc[stox_df["ticker"] == ticker, "price"].values[0]
     original_price = st.session_state.original_prices.get(ticker, current_price)
 
     # Calculate % change
@@ -81,19 +175,19 @@ for ticker in stox_df["Ticker"]:
     shares_available = MAX_SHARES_PER_STOX - total_held
 
     styled_data.append({
-        "Ticker": ticker,
-        "Price": current_price,
+        "ticker": ticker,
+        "price": current_price,
         "% Change": pct_str,
         "Available": shares_available
     })
 
-# --- Left Column: Stox Prices ---
+# --- Left Column: Stox prices ---
 with col1:
-    st.markdown("### 📈 Current Stox Prices")
+    st.markdown("### 📈 Current Stox prices")
 
     table_data = []
-    for ticker in stox_df["Ticker"]:
-        current_price = stox_df.loc[stox_df["Ticker"] == ticker, "Price"].values[0]
+    for ticker in stox_df["ticker"]:
+        current_price = stox_df.loc[stox_df["ticker"] == ticker, "price"].values[0]
         original_price = st.session_state.original_prices.get(ticker, current_price)
 
         pct_change = ((current_price - original_price) / original_price) * 100
@@ -103,15 +197,14 @@ with col1:
         shares_available = MAX_SHARES_PER_STOX - total_held
 
         table_data.append({
-            "Ticker": ticker,
-            "Price": f"₣{current_price}",
+            "ticker": ticker,
+            "price": f"₣{current_price}",
             "% Change": pct_str,
             "Available": f"{shares_available} left"
         })
 
     df_stox = pd.DataFrame(table_data)
 
-    # Optional styling — color % change column
     def highlight_changes(val):
         if isinstance(val, str) and "%" in val:
             if "+" in val:
@@ -176,14 +269,14 @@ with hated_col:
         st.info("No hate yet. No stox have been sold.")
 
 
-# --- 📈 Unified Stox Price History (Filtered + Animated) ---
+# --- 📈 Unified Stox price History (Filtered + Animated) ---
 from streamlit_autorefresh import st_autorefresh
 import matplotlib.dates as mdates
 
-# Enable auto-refresh every 10 seconds (adjust or comment out to disable)
+# Enable auto-refresh every 10 seconds (comment out to disable)
 st_autorefresh(interval=10 * 1000, key="auto_refresh")
 
-st.markdown("<h3 style='text-align: center;'>Stox Price History</h3>", unsafe_allow_html=True)
+st.markdown("<h3 style='text-align: center;'>Stox price History</h3>", unsafe_allow_html=True)
 
 # Dropdown to filter stox
 all_tickers = list(st.session_state.price_history.keys())
@@ -202,8 +295,8 @@ for ticker, records in st.session_state.price_history.items():
     for entry in records:
         all_data.append({
             "Time": entry["Time"],
-            "Price": entry["Price"],
-            "Ticker": ticker
+            "price": entry["price"],
+            "ticker": ticker
         })
 
 if len(all_data) >= 2:
@@ -215,14 +308,14 @@ if len(all_data) >= 2:
     ax.set_facecolor('#0e1117')
 
     for ticker in selected_tickers:
-        df_ticker = df_all[df_all["Ticker"] == ticker]
+        df_ticker = df_all[df_all["ticker"] == ticker]
         if not df_ticker.empty:
-            ax.plot(df_ticker["Time"], df_ticker["Price"],
+            ax.plot(df_ticker["Time"], df_ticker["price"],
                     label=ticker, linewidth=1.5, marker='o', markersize=4)
 
-    ax.set_title("Stox Price History (Filtered)", fontsize=10, color='white')
+    ax.set_title("Stox price History (Filtered)", fontsize=10, color='white')
     ax.set_xlabel("Time", fontsize=8, color='gray')
-    ax.set_ylabel("Price (₣)", fontsize=8, color='gray')
+    ax.set_ylabel("price (₣)", fontsize=8, color='gray')
     ax.tick_params(axis='both', colors='gray', labelsize=8)
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
 
@@ -248,8 +341,14 @@ if player_name:
     if player_name not in st.session_state.players:
         st.session_state.players[player_name] = {
             "balance": starting_balance,
-            "holdings": {ticker: 0 for ticker in stox_df["Ticker"]}
+            "holdings": {ticker: 0 for ticker in stox_df["ticker"]}
         }
+
+        # --- Supabase Write: Save new player ---
+        supabase.table("players").upsert([{
+            "player_id": player_name,
+            "balance": starting_balance
+        }]).execute()
 
     player = st.session_state.players[player_name]
     show_player_info(player)
@@ -259,8 +358,8 @@ buy_col, sell_col = st.columns(2)
 
 with buy_col:
     st.markdown("### 🟢 Buy Shares")
-    selected_stock = st.selectbox("Which stox to buy?", stox_df["Ticker"])
-    price = stox_df.loc[stox_df["Ticker"] == selected_stock, "Price"].values[0]
+    selected_stock = st.selectbox("Which stox to buy?", stox_df["ticker"])
+    price = stox_df.loc[stox_df["ticker"] == selected_stock, "price"].values[0]
     broker_fee = 5
 
     buy_mode = st.radio("Buy mode:", ["By quantity", "By amount"], horizontal=True)
@@ -268,32 +367,19 @@ with buy_col:
     if buy_mode == "By quantity":
         quantity = st.number_input("How many to buy?", min_value=1, step=1)
         total_cost = price * quantity + broker_fee
-        st.markdown(
-            f"<span style='color:gray;'>💸 {quantity}x ₣{price} + ₣{broker_fee} broker fee = "
-            f"<strong>₣{total_cost}</strong></span>",
-            unsafe_allow_html=True
-        )
     else:
         spend_amount = st.number_input("How much to spend? (₣)", min_value=price + broker_fee, step=1)
         quantity = int((spend_amount - broker_fee) // price)
         total_cost = quantity * price + broker_fee
 
-        st.markdown(
-            f"<span style='color:gray;'>💸 You’ll get <strong>{quantity}</strong> shares of <strong>{selected_stock}</strong> "
-            f"at ₣{price} each (₣{quantity * price} + ₣{broker_fee} broker fee = "
-            f"<strong>₣{total_cost}</strong>)</span>",
-            unsafe_allow_html=True
-        )
-
+    st.markdown(f"💸 {quantity}x ₣{price} + ₣{broker_fee} = ₣{total_cost}", unsafe_allow_html=True)
     memo = st.text_input("Reason for buying?")
 
     if st.button("Place Buy Order"):
-        available = MAX_SHARES_PER_STOX - sum(
-            p["holdings"].get(selected_stock, 0) for p in st.session_state.players.values()
-        )
+        available = MAX_SHARES_PER_STOX - sum(p["holdings"].get(selected_stock, 0) for p in st.session_state.players.values())
 
         if quantity < 1:
-            st.error("❌ That amount won’t buy a single stox. Spend more or lower your standards.")
+            st.error("❌ That amount won’t buy a single stox.")
         elif quantity > available:
             st.error(f"❌ Only {available} shares of {selected_stock} are available.")
         elif player["balance"] >= total_cost:
@@ -301,11 +387,14 @@ with buy_col:
             player["holdings"][selected_stock] += quantity
 
             new_price = round(price * (1 + 0.01 * quantity))
-            st.session_state.stox_df.loc[stox_df["Ticker"] == selected_stock, "Price"] = new_price
+            st.session_state.stox_df.loc[stox_df["ticker"] == selected_stock, "price"] = new_price
+
+            # 🔁 Update Supabase Prices Table
+            supabase.table("prices").update({"price": new_price}).eq("ticker", selected_stock).execute()
 
             st.session_state.price_history[selected_stock].append({
                 "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "Price": new_price
+                "price": new_price
             })
 
             st.session_state.transactions.append({
@@ -313,22 +402,40 @@ with buy_col:
                 "Action": "BUY",
                 "Stock": selected_stock,
                 "Qty": quantity,
-                "Price": price,
+                "price": price,
                 "Total": total_cost,
                 "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "Memo": memo
             })
 
+            # --- Supabase Write: Transactions + Holdings ---
+            supabase.table("transactions").insert([{
+                "player": player_name,
+                "action": "BUY",
+                "stock": selected_stock,
+                "qty": quantity,
+                "price": price,
+                "total": total_cost,
+                "time": datetime.now().isoformat(),
+                "memo": memo
+            }]).execute()
+
+            supabase.table("holdings").upsert([{
+                "player_id": player_name,
+                "ticker": selected_stock,
+                "quantity": player["holdings"][selected_stock]
+            }]).execute()
+
             st.success(f"✅ {player_name} bought {quantity}x {selected_stock} for ₣{total_cost}!")
             show_player_info(player)
             st.rerun()
         else:
-            st.error("❌ Not enough funds. Go cry in the shower.")
+            st.error("❌ Not enough funds.")
 
 with sell_col:
     st.markdown("### 🔴 Sell Shares")
-    sell_stock = st.selectbox("Which stox to sell?", stox_df["Ticker"], key="sell_stock")
-    sell_price = stox_df.loc[stox_df["Ticker"] == sell_stock, "Price"].values[0]
+    sell_stock = st.selectbox("Which stox to sell?", stox_df["ticker"], key="sell_stock")
+    sell_price = stox_df.loc[stox_df["ticker"] == sell_stock, "price"].values[0]
     broker_fee = 5
 
     sell_mode = st.radio("Sell mode:", ["By quantity", "By amount"], horizontal=True, key="sell_mode")
@@ -336,26 +443,19 @@ with sell_col:
     if sell_mode == "By quantity":
         sell_quantity = st.number_input("How many to sell?", min_value=1, step=1, key="sell_qty")
         earnings = sell_price * sell_quantity - broker_fee
-        st.markdown(f"<span style='color:gray;'>💰 After ₣5 broker fee, you’ll earn: ₣{earnings}</span>", unsafe_allow_html=True)
-
     else:
         sell_amount = st.number_input("How much value to sell? (₣)", min_value=sell_price + broker_fee, step=1, key="sell_amt")
         sell_quantity = int((sell_amount - broker_fee) // sell_price)
         earnings = sell_quantity * sell_price - broker_fee
 
-        st.markdown(
-            f"<span style='color:gray;'>💰 You’ll sell <strong>{sell_quantity}</strong>x {sell_stock} at ₣{sell_price} each "
-            f"(-₣{broker_fee} fee = ₣{earnings}).</span>",
-            unsafe_allow_html=True
-        )
-
+    st.markdown(f"💰 Sell earnings: ₣{earnings} after fee", unsafe_allow_html=True)
     sell_memo = st.text_input("Reason for selling?", key="sell_memo")
 
     if st.button("Sell Shares"):
         owned_qty = player["holdings"].get(sell_stock, 0)
 
         if sell_quantity < 1:
-            st.error("❌ That won’t sell anything. Try again.")
+            st.error("❌ That won’t sell anything.")
         elif sell_quantity > owned_qty:
             st.error(f"❌ You only own {owned_qty} shares of {sell_stock}.")
         else:
@@ -363,11 +463,14 @@ with sell_col:
             player["holdings"][sell_stock] -= sell_quantity
 
             new_price = max(1, round(sell_price * (1 - 0.01 * sell_quantity)))
-            st.session_state.stox_df.loc[stox_df["Ticker"] == sell_stock, "Price"] = new_price
+            st.session_state.stox_df.loc[stox_df["ticker"] == sell_stock, "price"] = new_price
+
+            # 🔁 Update Supabase Prices Table
+            supabase.table("prices").update({"price": new_price}).eq("ticker", sell_stock).execute()
 
             st.session_state.price_history[sell_stock].append({
                 "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "Price": new_price
+                "price": new_price
             })
 
             st.session_state.transactions.append({
@@ -375,11 +478,29 @@ with sell_col:
                 "Action": "SELL",
                 "Stock": sell_stock,
                 "Qty": sell_quantity,
-                "Price": sell_price,
+                "price": sell_price,
                 "Total": earnings,
                 "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "Memo": sell_memo
             })
+
+            # --- Supabase Write: Transactions + Holdings ---
+            supabase.table("transactions").insert([{
+                "player": player_name,
+                "action": "SELL",
+                "stock": sell_stock,
+                "qty": sell_quantity,
+                "price": sell_price,
+                "total": earnings,
+                "time": datetime.now().isoformat(),
+                "memo": sell_memo
+            }]).execute()
+
+            supabase.table("holdings").upsert([{
+                "player_id": player_name,
+                "ticker": sell_stock,
+                "quantity": player["holdings"][sell_stock]
+            }]).execute()
 
             st.success(f"✅ {player_name} sold {sell_quantity}x {sell_stock} for ₣{earnings}!")
             show_player_info(player)
@@ -395,13 +516,13 @@ if player_name:
 
     for ticker, qty in holdings.items():
         if qty > 0:
-            current_price = stox_df.loc[stox_df["Ticker"] == ticker, "Price"].values[0]
+            current_price = stox_df.loc[stox_df["ticker"] == ticker, "price"].values[0]
             total_value = qty * current_price
             portfolio_total += total_value
             rows.append({
                 "Stox": ticker,
                 "Shares Held": qty,
-                "Current Price (₣)": current_price,
+                "Current price (₣)": current_price,
                 "Total Value (₣)": total_value
             })
 
@@ -461,3 +582,4 @@ if st.button("💥 Reset Game"):
         if key in st.session_state:
             del st.session_state[key]
     st.rerun()
+
