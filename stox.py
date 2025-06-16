@@ -6,6 +6,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import seaborn as sns
+import time
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://dfhuqxvvyajbsawmmlzb.supabase.co")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRmaHVxeHZ2eWFqYnNhd21tbHpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk5OTkzODgsImV4cCI6MjA2NTU3NTM4OH0.BRcyjG1pyVHvHogImc6atbICfAFddQ7KCM6VUniLVUU")
@@ -428,6 +429,7 @@ with buy_col:
 
             st.success(f"✅ {player_name} bought {quantity}x {selected_stock} for ₣{total_cost}!")
             show_player_info(player)
+            time.sleep(1)  # Add this line
             st.rerun()
         else:
             st.error("❌ Not enough funds.")
@@ -504,6 +506,7 @@ with sell_col:
 
             st.success(f"✅ {player_name} sold {sell_quantity}x {sell_stock} for ₣{earnings}!")
             show_player_info(player)
+            time.sleep(1)  # Add this line
             st.rerun()
 
 # --- 💼 My Portfolio ---
