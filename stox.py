@@ -46,10 +46,10 @@ if "price_history" not in st.session_state:
 if "players" not in st.session_state:
     players = {}
     for p in supabase.table("players").select("*").execute().data:
-        players[p["player_id"]] = {"balance": p["balance"], "holdings": {}}
+        players[p["name"]] = {"balance": p["balance"], "holdings": {}}
     for h in supabase.table("holdings").select("*").execute().data:
-        if h["player_id"] in players:
-            players[h["player_id"]]["holdings"][h["ticker"]] = h["quantity"]
+        if h["name"] in players:
+            players[h["name"]]["holdings"][h["ticker"]] = h["quantity"]
     for p in players.values():
         for t in tickers:
             p["holdings"].setdefault(t, 0)
@@ -302,7 +302,7 @@ if player_name:
 
         # --- Supabase Write: Save new player ---
         supabase.table("players").upsert([{
-            "player_id": player_name,
+            "name": player_name,
             "balance": starting_balance
         }]).execute()
 
@@ -377,7 +377,7 @@ with buy_col:
             }]).execute()
 
             supabase.table("holdings").upsert([{
-                "player_id": player_name,
+                "name": player_name,
                 "ticker": selected_stock,
                 "quantity": player["holdings"][selected_stock]
             }]).execute()
@@ -454,7 +454,7 @@ with sell_col:
             }]).execute()
 
             supabase.table("holdings").upsert([{
-                "player_id": player_name,
+                "name": player_name,
                 "ticker": sell_stock,
                 "quantity": player["holdings"][sell_stock]
             }]).execute()
