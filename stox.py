@@ -317,17 +317,28 @@ with st.container():
         player_name = st.text_input("Your name")
 
 if player_name:
+    # If new player, add to Supabase and local session
     if player_name not in st.session_state.players:
+        # Insert new player
+        response = supabase.table("players").insert({
+            "name": player_name,
+            "balance": starting_balance
+        }).execute()
+
+        # Get the new player UUID
+        player_data = response.data[0]
+        player_id = player_data["id"]
+
+        # Save in session
         st.session_state.players[player_name] = {
+            "id": player_id,
             "balance": starting_balance,
             "holdings": {ticker: 0 for ticker in stox_df["ticker"]}
         }
-
-        # --- Supabase Write: Save new player ---
-        supabase.table("players").upsert([{
-            "name": player_name,
-            "balance": starting_balance
-        }]).execute()
+        st.session_state.name_to_id[player_name] = player_id
+    else:
+        # Existing player
+        player_id = st.session_state.name_to_id[player_name]
 
     player = st.session_state.players[player_name]
     show_player_info(player)
