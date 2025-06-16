@@ -331,10 +331,10 @@ if player_name:
     # If new player, add to Supabase and local session
     if player_name not in st.session_state.players:
         # Insert new player
-        response = supabase.table("players").insert({
+        response = supabase.table("players").insert([{
             "name": player_name,
             "balance": starting_balance
-        }).execute()
+        }]).execute()
 
         # Get the new player UUID
         player_data = response.data[0]
