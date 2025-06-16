@@ -202,7 +202,7 @@ with col2:
     st.markdown("### 🏆 Leaderboard")
     if leaderboard:
         leaderboard_df = pd.DataFrame(leaderboard)
-        leaderboard_df = leaderboard_df.sort_values(by="Net Worth (₣)", ascending=False)
+        leaderboard_df = leaderboard_df.sort_values(by="Net Worth", ascending=False)
         st.dataframe(leaderboard_df, use_container_width=True)
     else:
         st.info("No players in the game yet. Buy or sell to get on the board!")
