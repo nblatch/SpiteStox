@@ -4,27 +4,14 @@ import os
 from supabase import create_client, Client
 from datetime import datetime
 import matplotlib.pyplot as plt
-import matplotlib as mpl
-import seaborn as sns
+import matplotlib.dates as mdates
+from streamlit_autorefresh import st_autorefresh
 import time
 
+# --- Supabase Setup ---
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://dfhuqxvvyajbsawmmlzb.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRmaHVxeHZ2eWFqYnNhd21tbHpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk5OTkzODgsImV4cCI6MjA2NTU3NTM4OH0.BRcyjG1pyVHvHogImc6atbICfAFddQ7KCM6VUniLVUU")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRmaHVxeHZ2eWFqYnNhd21tbHpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk5OTkzODgsImV4cCI6MjA2NTU3NTM4OH0.BRcyjG1pyVHvHogImc6atbICfAFddQ7KCM6VUniLVUU")  # Replace with actual secure key
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# --- Load persisted data from Supabase ---
-
-if "transactions" not in st.session_state:
-    tx_resp = supabase.table("transactions").select("*").execute()
-    st.session_state.transactions = tx_resp.data
-
-# Ensure stock prices are loaded too
-if "stox_df" not in st.session_state:
-    prices_resp = supabase.table("prices").select("*").execute()
-    if prices_resp.data:
-        st.session_state.stox_df = pd.DataFrame(prices_resp.data)
-    else:
-        st.session_state.stox_df = pd.DataFrame(columns=["ticker", "price", "original_price"])
 
 # --- Game Config ---
 MAX_SHARES_PER_STOX = 100
@@ -32,69 +19,57 @@ starting_balance = 15000
 starting_price = 300
 tickers = ['ANGL', 'ARYE', 'DANL', 'DRNC', 'ELLI', 'FRDY', 'JIN', 'RCHL']
 
-# --- Setup ---
 st.set_page_config(page_title="Spite Stox Market", layout="wide")
 
-# --- Load prices from Supabase ---
-price_data = supabase.table("prices").select("*").execute()
-
-if price_data.data:
-    st.session_state.stox_df = pd.DataFrame(price_data.data)
-else:
-    st.warning("⚠️ No price data found in Supabase.")
-    st.session_state.stox_df = pd.DataFrame(columns=["ticker", "price", "original_price"])
+# --- Load Prices ---
+if "stox_df" not in st.session_state:
+    prices = supabase.table("prices").select("*").execute().data
+    if not prices:
+        prices = [{"ticker": t, "price": starting_price, "original_price": starting_price} for t in tickers]
+        supabase.table("prices").insert(prices).execute()
+    st.session_state.stox_df = pd.DataFrame(prices)
 
 stox_df = st.session_state.stox_df
 
-# --- Set original prices from Supabase data ---
+# --- Original Prices ---
 if "original_prices" not in st.session_state:
     st.session_state.original_prices = {
         row["ticker"]: row["original_price"]
-        for row in st.session_state.stox_df.to_dict(orient="records")
+        for row in stox_df.to_dict(orient="records")
     }
 
-# --- Initialize price history ---
+# --- Price History ---
 if "price_history" not in st.session_state:
-    st.session_state.price_history = {
-        row["ticker"]: [] for row in st.session_state.stox_df.to_dict(orient="records")
-    }
+    st.session_state.price_history = {row["ticker"]: [] for row in stox_df.to_dict(orient="records")}
 
-# --- Session State ---
-
-# Load Players & Holdings from Supabase
+# --- Players & Holdings ---
 if "players" not in st.session_state:
-    st.session_state.players = {}
+    players = {}
+    for p in supabase.table("players").select("*").execute().data:
+        players[p["player_id"]] = {"balance": p["balance"], "holdings": {}}
+    for h in supabase.table("holdings").select("*").execute().data:
+        if h["player_id"] in players:
+            players[h["player_id"]]["holdings"][h["ticker"]] = h["quantity"]
+    for p in players.values():
+        for t in tickers:
+            p["holdings"].setdefault(t, 0)
+    st.session_state.players = players
 
-    players_response = supabase.table("players").select("*").execute()
-    holdings_response = supabase.table("holdings").select("*").execute()
-
-    if players_response.data and holdings_response.data:
-        player_data = {
-            p["player_id"]: {
-                "balance": p["balance"],
-                "holdings": {}
-            }
-            for p in players_response.data
-        }
-
-        for h in holdings_response.data:
-            pid = h["player_id"]
-            ticker = h["ticker"]
-            qty = h["quantity"]
-            if pid in player_data:
-                player_data[pid]["holdings"][ticker] = qty
-
-        # Make sure all tickers exist in holdings
-        for pdata in player_data.values():
-            for ticker in stox_df["ticker"]:
-                if ticker not in pdata["holdings"]:
-                    pdata["holdings"][ticker] = 0
-
-        st.session_state.players = player_data
-
-# Transactions (local unless written to Supabase in later step)
+# --- Transactions ---
 if "transactions" not in st.session_state:
-    st.session_state.transactions = []
+    txs = supabase.table("transactions").select("*").order("time", desc=False).execute().data
+    st.session_state.transactions = [
+        {
+            "Player": t["player"],
+            "Action": t["action"],
+            "Stock": t["stock"],
+            "Qty": t["qty"],
+            "price": t["price"],
+            "Total": t["total"],
+            "Time": t["time"],
+            "Memo": t.get("memo", "")
+        } for t in txs
+    ]
 
 # Store stock price DataFrame
 stox_df = st.session_state.stox_df
@@ -120,28 +95,22 @@ if not st.session_state.transactions:
 
 # --- Helper Functions ---
 def show_player_info(player):
-    st.markdown(f"<div style='text-align: center;'>💰 <strong>Current Balance</strong>: ₣{player['balance']}<br>📦 <strong>Holdings</strong>: {player['holdings']}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='text-align: center;'>💰 <strong>Balance</strong>: ₣{player['balance']}<br>📦 <strong>Holdings</strong>: {player['holdings']}</div>", unsafe_allow_html=True)
 
 def calculate_net_worth(player):
-    total = player['balance']
-    for ticker, shares in player['holdings'].items():
-        price = stox_df.loc[stox_df['ticker'] == ticker, 'price'].values[0]
-        total += shares * price
-    return total
+    return player["balance"] + sum(
+        player["holdings"][ticker] * stox_df.loc[stox_df["ticker"] == ticker, "price"].values[0]
+        for ticker in player["holdings"]
+    )
 
-# --- Title ---
-st.markdown("<h1 style='text-align: center;'>🐟 Spite Stox Exchange 🐟</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center;'>Welcome to our own hate-fueled chaos market!</p>", unsafe_allow_html=True)
+# --- App Header ---
+st.title("🐟 Spite Stox Exchange")
+st.markdown("Welcome to our own hate-fueled chaos market!")
 
 # --- Leaderboard ---
-leaderboard = []
-for name, data in st.session_state.players.items():
-    net = calculate_net_worth(data)
-    leaderboard.append({
-        "Player": name,
-        "Net Worth (₣)": net,
-        "Balance (₣)": data["balance"]
-    })
+leaderboard = [{"Player": name, "Net Worth": calculate_net_worth(p), "Balance": p["balance"]}
+               for name, p in st.session_state.players.items()]
+col1, col2 = st.columns(2)
 
 # --- Market Overview ---
 st.markdown("<h2 style='text-align: center;'>Market Overview</h2>", unsafe_allow_html=True)
