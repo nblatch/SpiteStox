@@ -13,20 +13,6 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- Load persisted data from Supabase ---
-if "players" not in st.session_state:
-    players_resp = supabase.table("players").select("*").execute()
-    st.session_state.players = {
-        row["id"]: {
-            "balance": row["balance"],
-            "holdings": {}
-        } for row in players_resp.data
-    }
-
-    holdings_resp = supabase.table("holdings").select("*").execute()
-    for row in holdings_resp.data:
-        player_id = row["player_id"]
-        if player_id in st.session_state.players:
-            st.session_state.players[player_id]["holdings"][row["ticker"]] = row["quantity"]
 
 if "transactions" not in st.session_state:
     tx_resp = supabase.table("transactions").select("*").execute()
