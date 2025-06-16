@@ -506,7 +506,6 @@ with sell_col:
 
             st.success(f"✅ {player_name} sold {sell_quantity}x {sell_stock} for ₣{earnings}!")
             show_player_info(player)
-            time.sleep(5)  # Add this line
             st.rerun()
 
 # --- 💼 My Portfolio ---
