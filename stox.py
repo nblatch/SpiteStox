@@ -46,7 +46,17 @@ if "original_prices" not in st.session_state:
 
 # --- Price History ---
 if "price_history" not in st.session_state:
-    st.session_state.price_history = {row["ticker"]: [] for row in stox_df.to_dict(orient="records")}
+    # Load historical prices from transactions
+    price_history = {ticker: [] for ticker in tickers}
+    tx_data = supabase.table("transactions").select("*").order("time").execute().data
+    for tx in tx_data:
+        ticker = tx["ticker"]
+        if ticker in price_history:
+            price_history[ticker].append({
+                "Time": tx["time"],
+                "price": tx["price"]
+            })
+    st.session_state.price_history = price_history
 
 # --- Players & Holdings ---
 if "players" not in st.session_state:
@@ -81,11 +91,12 @@ if "players" not in st.session_state:
 # --- Transactions ---
 if "transactions" not in st.session_state:
     txs = supabase.table("transactions").select("*").order("time", desc=False).execute().data
+    id_to_name = {v: k for k, v in st.session_state.name_to_id.items()}  # Reverse lookup
     st.session_state.transactions = [
         {
-            "Player": t["player"],
+            "Player": id_to_name.get(t["player_id"], "Unknown"),
             "Action": t["action"],
-            "Stock": t["stock"],
+            "Stock": t["ticker"],
             "Qty": t["qty"],
             "price": t["price"],
             "Total": t["total"],
@@ -197,11 +208,11 @@ with col1:
         use_container_width=True
     )
 
-# --- Right Column: Leaderboard ---
 with col2:
     st.markdown("### 🏆 Leaderboard")
     if leaderboard:
         leaderboard_df = pd.DataFrame(leaderboard)
+        leaderboard_df["Net Worth"] = leaderboard_df["Net Worth"].astype(float)
         leaderboard_df = leaderboard_df.sort_values(by="Net Worth", ascending=False)
         st.dataframe(leaderboard_df, use_container_width=True)
     else:
