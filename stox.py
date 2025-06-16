@@ -23,10 +23,16 @@ st.set_page_config(page_title="Spite Stox Market", layout="wide")
 
 # --- Load Prices ---
 if "stox_df" not in st.session_state:
-    prices = supabase.table("prices").select("*").execute().data
+    response = supabase.table("prices").select("*").execute()
+    prices = response.data
+
     if not prices:
-        prices = [{"ticker": t, "price": starting_price, "original_price": starting_price} for t in tickers]
-        supabase.table("prices").insert(prices).execute()
+        # Insert default prices if table is empty
+        default_prices = [{"ticker": t, "price": starting_price, "original_price": starting_price} for t in tickers]
+        supabase.table("prices").insert(default_prices).execute()
+        # Re-fetch from Supabase after insert
+        prices = supabase.table("prices").select("*").execute().data
+
     st.session_state.stox_df = pd.DataFrame(prices)
 
 stox_df = st.session_state.stox_df
@@ -45,15 +51,32 @@ if "price_history" not in st.session_state:
 # --- Players & Holdings ---
 if "players" not in st.session_state:
     players = {}
-    for p in supabase.table("players").select("*").execute().data:
-        players[p["name"]] = {"balance": p["balance"], "holdings": {}}
-    for h in supabase.table("holdings").select("*").execute().data:
-        if h["name"] in players:
-            players[h["name"]]["holdings"][h["ticker"]] = h["quantity"]
-    for p in players.values():
+    name_to_id = {}
+
+    # Load all players from Supabase
+    player_records = supabase.table("players").select("*").execute().data
+    for p in player_records:
+        players[p["name"]] = {
+            "id": p["id"],  # Store UUID for use in foreign key lookups
+            "balance": p["balance"],
+            "holdings": {}
+        }
+        name_to_id[p["name"]] = p["id"]
+
+    # Load holdings and match by player_id
+    holdings_records = supabase.table("holdings").select("*").execute().data
+    for h in holdings_records:
+        for name, pdata in players.items():
+            if h["player_id"] == pdata["id"]:
+                pdata["holdings"][h["ticker"]] = h["quantity"]
+
+    # Ensure all tickers are initialized
+    for pdata in players.values():
         for t in tickers:
-            p["holdings"].setdefault(t, 0)
+            pdata["holdings"].setdefault(t, 0)
+
     st.session_state.players = players
+    st.session_state.name_to_id = name_to_id
 
 # --- Transactions ---
 if "transactions" not in st.session_state:
@@ -345,30 +368,15 @@ with buy_col:
             new_price = round(price * (1 + 0.01 * quantity))
             st.session_state.stox_df.loc[stox_df["ticker"] == selected_stock, "price"] = new_price
 
-            # 🔁 Update Supabase Prices Table
+            # 🔁 Update Supabase
+            player_id = st.session_state.name_to_id[player_name]
+
             supabase.table("prices").update({"price": new_price}).eq("ticker", selected_stock).execute()
 
-            st.session_state.price_history[selected_stock].append({
-                "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "price": new_price
-            })
-
-            st.session_state.transactions.append({
-                "Player": player_name,
-                "Action": "BUY",
-                "Stock": selected_stock,
-                "Qty": quantity,
-                "price": price,
-                "Total": total_cost,
-                "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "Memo": memo
-            })
-
-            # --- Supabase Write: Transactions + Holdings ---
             supabase.table("transactions").insert([{
-                "player": player_name,
+                "player_id": player_id,
                 "action": "BUY",
-                "stock": selected_stock,
+                "ticker": selected_stock,
                 "qty": quantity,
                 "price": price,
                 "total": total_cost,
@@ -377,14 +385,14 @@ with buy_col:
             }]).execute()
 
             supabase.table("holdings").upsert([{
-                "name": player_name,
+                "player_id": player_id,
                 "ticker": selected_stock,
                 "quantity": player["holdings"][selected_stock]
             }]).execute()
 
             st.success(f"✅ {player_name} bought {quantity}x {selected_stock} for ₣{total_cost}!")
             show_player_info(player)
-            time.sleep(1)  # Add this line
+            time.sleep(1)
             st.rerun()
         else:
             st.error("❌ Not enough funds.")
@@ -422,30 +430,15 @@ with sell_col:
             new_price = max(1, round(sell_price * (1 - 0.01 * sell_quantity)))
             st.session_state.stox_df.loc[stox_df["ticker"] == sell_stock, "price"] = new_price
 
-            # 🔁 Update Supabase Prices Table
+            # 🔁 Update Supabase
+            player_id = st.session_state.name_to_id[player_name]
+
             supabase.table("prices").update({"price": new_price}).eq("ticker", sell_stock).execute()
 
-            st.session_state.price_history[sell_stock].append({
-                "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "price": new_price
-            })
-
-            st.session_state.transactions.append({
-                "Player": player_name,
-                "Action": "SELL",
-                "Stock": sell_stock,
-                "Qty": sell_quantity,
-                "price": sell_price,
-                "Total": earnings,
-                "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "Memo": sell_memo
-            })
-
-            # --- Supabase Write: Transactions + Holdings ---
             supabase.table("transactions").insert([{
-                "player": player_name,
+                "player_id": player_id,
                 "action": "SELL",
-                "stock": sell_stock,
+                "ticker": sell_stock,
                 "qty": sell_quantity,
                 "price": sell_price,
                 "total": earnings,
@@ -454,7 +447,7 @@ with sell_col:
             }]).execute()
 
             supabase.table("holdings").upsert([{
-                "name": player_name,
+                "player_id": player_id,
                 "ticker": sell_stock,
                 "quantity": player["holdings"][sell_stock]
             }]).execute()
@@ -535,8 +528,17 @@ st.markdown("<h4 style='text-align: center;'>Danger Zone</h4>", unsafe_allow_htm
 st.warning("⚠️ Hitting this button will wipe the entire market. Portfolios? Gone. Memos? Vaporized. Drama? Reset. Proceed only if the group unanimously agrees... or if you're feeling *really* spiteful.")
 
 if st.button("💥 Reset Game"):
+    # Clear Supabase tables
+    supabase.table("transactions").delete().neq("id", 0).execute()
+    supabase.table("holdings").delete().neq("id", 0).execute()
+    supabase.table("players").delete().neq("id", 0).execute()
+    supabase.table("prices").delete().neq("id", 0).execute()
+
+    # Clear local session state
     for key in ["players", "transactions", "stox_df", "price_history", "original_prices"]:
         if key in st.session_state:
             del st.session_state[key]
+
+    st.success("💥 The market has been obliterated.")
     st.rerun()
 
